@@ -1,0 +1,212 @@
+---
+title: "Modelling the epigenetic landscape in plant development"
+author: Davila-Velderrain, J. ,Caldu-Primo, J.L., Martinez-Garcia, J.C., Alvarez-Buylla,
+  R.E.
+output: pdf_document
+---
+
+Load the required libraries and set the working directory. The working directory must contain the text documents defining the networks to use.
+```{r, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+library(igraph)
+library(BoolNet)
+setwd("/run/media/desoj/TOSHIBA EXT/Doctorado/colaboracion_Jose/Epigenetic_Landsape_Modeling_Chapter/EL_Models_Chapter/Analysis")
+```
+
+###Dynamic analysis of a random network
+
+Here we present the basic steps for dynamically characterizing a network using Boolnet:loading the network and obtaining its attractors and their corresponding attractor basins.
+```{r, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+
+# generate a random network with 8 nodes, each regulated by 2 nodes
+net <- generateRandomNKNetwork(n=8, k=2) 
+
+net <- loadNetwork("RandomNet.txt") # loading a predefined network
+
+plotNetworkWiring(net,vertex.size=35,,vertex.label.color="black", vertex.color="white",vertex.size=25, edge.color="black",layout=layout.circle)
+
+rAttrs <- getAttractors(net) # obtain the network's attractors
+par(mfrow=c(1,2))
+plotAttractors(rAttrs)
+
+par(mfrow=c(1,1))
+plotStateGraph(rAttrs) # graphical representation of the basins of attraction
+```
+
+### Dynamical analysis of the Arabidopsis root stem cell niche-GRN
+
+Now we will perform a dynamical analysis on the Arabidopsis root SCN-GRN.
+
+```{r, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+###### Arabidopsis root SCN-GRN
+#load the network from a text file containing the Boolean functions
+root <-loadNetwork("root_SCN.txt") 
+
+plotNetworkWiring(root,vertex.size=35,vertex.label.color="black", vertex.color="white", edge.color="black",layout= layout.circle)
+
+Attrs <- getAttractors(root) #obtain the attractors
+
+plotAttractors(Attrs)
+plotStateGraph(Attrs)
+```
+
+### Epigenetic Landscape Modelling
+After dynamically characterizin the root SCN-GRN, we present the basic steps for modeling its associated Epigenetic Landscape. This method is performed by calculating the inter-attractor transition probability matrix. We use our defined functions to perform these analysis
+
+#####Load the functions to model the Epigenetic Landscape.
+```{r, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+# FUNCTIONS
+########################################################################
+ Get.Attractors.Landscape <- function(Network) {
+   attrs <- getAttractors(Network)
+   TransTable <- getTransitionTable(attrs)
+
+   Inits <- TransTable[[1]]
+   for(i in 2:length(Network$genes)) Inits <- cbind(Inits, TransTable[[i]])
+
+   AttractsClusterVector <- TransTable$attractorAssignment
+
+   return(list(Inits, AttractsClusterVector))
+ }
+####################################################
+Implicit.InterAttractor.Simulation <- function(Network, P.error, Nreps) {
+  # Simulates binomial mutations in all space
+  #Get State Space and x(t+1) = f(x) for each state
+  AttrsLandscape <- Get.Attractors.Landscape(Network)
+  Ngenes <- ncol(AttrsLandscape[[1]])
+  Nattractors <- length(names(table(AttrsLandscape[[2]])))
+  StateSpace <- AttrsLandscape[[1]]
+  Next.T.StateSpace <- StateSpace*0
+  Next.T.StateSpace <- t(sapply(1:nrow(Next.T.StateSpace), function(i) Next.T.StateSpace[i,] <- stateTransition(Network, StateSpace[i,])))
+  colnames(StateSpace) <- colnames(Next.T.StateSpace)
+  Char.State.Space <- apply(StateSpace, 1, function(i) paste(i, collapse=""))
+
+  #Create Attractors Transition Probability Matrix
+  T.Prob.Mat <- matrix(0, Nattractors, Nattractors)
+  rownames(T.Prob.Mat) <- 1:Nattractors
+  colnames(T.Prob.Mat) <- 1:Nattractors
+  AttrsInd <- as.numeric(colnames(T.Prob.Mat))
+
+  #Create Muation Indicator Vector
+  MutMatrix <- rbinom(Nreps*Ngenes*nrow(StateSpace), 1, P.error)
+
+  #Create concatenated vector of X(t+1)
+  NextSs <- as.numeric(apply(Next.T.StateSpace,1, function(i) rep(i, Nreps)))
+
+  #Simulate "errors" in X(t+1)
+  Mutind <- which(MutMatrix==1)
+  ZeroInd <- Mutind[which(NextSs[Mutind]==1)]
+  UnoInd <- Mutind[which(NextSs[Mutind]==0)]
+  NextSs[ZeroInd] <- 0
+  NextSs[UnoInd] <- 1
+
+  #Split and count states in X(t+1). Match them with basins.
+  NextSs <- apply(matrix(NextSs, Nreps*nrow(StateSpace), Ngenes, byrow=TRUE), 1, function(i) paste(i, collapse=""))
+  NextSs.LL <- lapply(split(NextSs, rep(1:nrow(StateSpace), each=Nreps)), table)
+  Basins.L <-  lapply(NextSs.LL, function(i) AttrsLandscape[[2]][match(names(i), Char.State.Space)])
+
+  #Update Attractors Transition Probability Matrix
+  for(j in 1:nrow(StateSpace)) T.Prob.Mat[AttrsLandscape[[2]][j], ] <- T.Prob.Mat[AttrsLandscape[[2]][j], ] + sapply(1:length(AttrsInd), function(i) sum(NextSs.LL[[j]][which(AttrsInd[i]==Basins.L[[j]])]))
+
+  #Normalize Attractors Transition Probability Matrix
+  T.Prob.Mat <- t(sapply(1:nrow(T.Prob.Mat), function(i) T.Prob.Mat[i,]/sum(T.Prob.Mat[i,])))
+  return(T.Prob.Mat)
+}
+####################################################
+Calculate.MFPT.Matrix <- function(P, AttrsNames=1:ncol(P)) {
+
+  for(i in 1:nrow(P)){
+    x<-1:nrow(P)
+    z<-matrix(0,nrow(P)-1,1)
+    unos<-matrix(1,nrow(P)-1,1)
+    id<-diag(ncol(P)-1)
+    x1<-cbind(z,id)
+    x2<-cbind(unos,P[x[x!=i],x[x!=i]])
+    G<-rbind(x1,x2)   ##matrix G start process
+
+    for(j in 1:(nrow(P)-1)){
+      T6<-G[1:nrow(G)-1,1:ncol(G)-1]
+      U6<-as.matrix(G[1:nrow(G)-1,ncol(G)])
+      R6<-t(as.matrix(G[nrow(G),1:ncol(G)-1]))
+      Q6<-G[nrow(G),ncol(G)]
+      G5<-T6+U6%*%(1-Q6)^(-1)%*%R6
+      G<-G5
+    }
+
+    H<-vector()
+    H[i]<-0
+
+    for(s in 1:nrow(P) ){
+      if((s==1)&(s!=i)) H[s]<-G[s]
+      if((s<i)&(s>1)) H[s]<-G[s]
+      if(s>i) H[s]<-G[s-1]
+    }
+
+    H<-as.matrix(H)
+
+    if(i>1) M<-cbind(M,H)
+    else M<-H
+  }
+  rownames(M) <- AttrsNames
+  colnames(M) <- AttrsNames
+  return(M)
+}
+####################################################
+MFPT.Transition.Rates <- function(MFPTsMAT) {
+  Mat <- (1/MFPTsMAT) - 1/t(MFPTsMAT)
+  diag(Mat) <- 0
+  return(Mat)
+}
+####################################################
+Plot.Attractor.Global.Ordering <- function(TransitionRates) {
+  Graph <- graph.adjacency(TransitionRates, mode="directed", add.rownames=TRUE, weighted=TRUE)
+  igraph.options(vertex.size=25)
+  E(Graph)[E(Graph)$weight>0]$color <- "red"
+  plot(Graph)
+}
+####################################################
+Plot.Probability.Evolution <- function(TPM, Initial, AttrsNames, timeF) {
+  Times <- 1:timeF
+  P <- as.matrix(TPM)
+  Pinit <- P[1,]*0
+  Pinit[which(AttrsNames==Initial)] <- 1
+  
+  ProbEvolution <- matrix(0, length(Times)+1, ncol(P))
+  ProbEvolution[1,] <- Pinit
+  
+  for(i in Times) ProbEvolution[i+1,] <- ProbEvolution[i,] %*% (P)
+  
+  par(xpd=F)
+  matplot(ProbEvolution, type="l", lwd=2, col=1:length(AttrsNames), main=paste(Initial,"->", "Probability Temporal Evolution"), xlab="t", ylab="P(A)")
+  print(AttrsNames[order(apply(ProbEvolution, 2, which.max))])
+  abline(v=apply(ProbEvolution, 2, function(i) which(max(round(i, 3))==round(i, 3))[1]), col=1:length(AttrsNames), lwd=2)
+  colnames(ProbEvolution) <- AttrsNames
+  return(ProbEvolution)
+}
+```
+
+##### EL modelling of the root SNC-GRN
+
+Now we apply the functions to the root SCN-GRN
+```{r, tidy=TRUE, tidy.opts=list(width.cutoff=60)}
+# calculate the interattractor transition matrix with an error probability
+# of 0.05 and 1000 repetitions
+IAT_5<-Implicit.InterAttractor.Simulation(root,P.error=0.05,Nreps = 1000) 
+
+atracts <- c("CEpI","VI","CEI", "QC") # root SCN attractors/cell-types
+
+# attractor transitions starting at QC
+Plot.Probability.Evolution(IAT_5,Initial = "QC",AttrsNames = atracts,timeF=50) 
+legend("topright", lty = 1:4,legend=atracts,cex=0.8,col=1:4)
+
+
+# calculate the mean first passage time matrix among attractors
+MFPT<- Calculate.MFPT.Matrix (IAT_5,atracts) 
+
+# calculate the inter-attractor transition rates according to the mean
+# first passage time matrix
+Trans.rates<- MFPT.Transition.Rates(MFPT) 
+
+# plot the attractor global order network
+Plot.Attractor.Global.Ordering(Trans.rates) 
+
+```
